@@ -61,7 +61,7 @@ def safe_summarize(text, **kwargs):
         return text[:300]
 
 
-# ---------- Tools ----------
+# Tools
 def search_news_rss(query, days=7, max_items=10):
     """Fetch Google News RSS search results and return list of dicts {title, link, snippet}."""
     q = requests.utils.quote(query)
@@ -105,7 +105,7 @@ def summarize_text(text, default_max=130):
     if not text:
         return ""
 
-    # Clean stray HTML tags
+    # Clean HTML tags
     text = re.sub(r"<[^>]+>", "", text)
 
     # Use model-based summarization if available
@@ -159,7 +159,7 @@ def generate_action_items(summary, n=5):
         items.append(f"{i}. Investigate recent updates related to {kw.strip()}.")
     return "\n".join(items)
 
-# ---------- File saving helpers ----------
+# FILE SAVING HELPERS.
 def save_text_report(report_text, filename=None):
     if not filename:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -178,7 +178,7 @@ def save_markdown_report(md_text, filename=None):
     print(f"[file] saved markdown report: {os.path.abspath(filename)}")
     return filename
 
-# ---------- Planner & Reasoner ----------
+# -Planner and Reasoner
 class Planner:
     def __init__(self, goal):
         self.goal = goal
@@ -205,7 +205,7 @@ class Reasoner:
     def decide_expansion(self, search_results):
         return len(search_results) == 0
 
-# ---------- Agent ----------
+# Agent
 class ScoutAgent:
     def __init__(self, goal):
         self.goal = goal
@@ -217,7 +217,7 @@ class ScoutAgent:
     def run(self):
         print(f"ScoutAgent starting on goal: {self.goal}")
 
-        # 🧠 Log which summarization model (if any) is active
+        # Log which summarization model (if any) is active
         if SUMMARIZER:
             try:
                 print("[model] Using summarizer:", SUMMARIZER.model.name_or_path)
@@ -226,7 +226,7 @@ class ScoutAgent:
         else:
             print("[model] Using fallback heuristic summarizer")
 
-        # 🧭 Agentic planning
+        #  Agentic planning
         plan = self.planner.plan()
         self.context["plan"] = plan
         print(f"[agent] plan: {plan}")
@@ -325,7 +325,6 @@ class ScoutAgent:
         return "\n".join(lines)
 
     def generate_markdown_report(self):
-        # Create a markdown report for GitHub friendly output
         goal = self.goal
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         md = []
@@ -346,7 +345,7 @@ class ScoutAgent:
         md.append("\n*Generated autonomously by ScoutAgent.*")
         return "\n\n".join(md)
 
-# ---------- CLI ----------
+# Command Line Interface
 def main():
     goal = sys.argv[1] if len(sys.argv) > 1 else "AI regulation"
     agent = ScoutAgent(goal)
