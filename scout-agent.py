@@ -3,11 +3,11 @@
 My news research scraper - ScoutAgent
 github.com/Aranya-Marjara
 
-Quick and dirty tool to research topics via news articles.
+Quick tool to research topics via news articles.
 Grabs recent news, summarizes key points, and suggests next steps.
 
 Usage:
-    python scout_agent.py "your research topic"
+    python3 scout-agent.py "your research topic"
 """
 
 import warnings
