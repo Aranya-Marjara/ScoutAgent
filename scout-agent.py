@@ -12,8 +12,15 @@ Features:
 - Uses Hugging Face transformers summarizer if available, otherwise a simple fallback
 
 Run:
-    python3 scout-agent.py "your topic here"
+    python3 agent.py "your topic here"
 """
+import warnings
+import logging
+
+# Suppress all unnecessary Hugging Face warnings & info logs
+warnings.filterwarnings("ignore", message=r".*max_length.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from datetime import datetime
 import time
@@ -24,13 +31,29 @@ import re
 import random
 import os
 import sys
-
 # Optional summarizer (Hugging Face). If not installed, falls back to simple extractor.
 try:
     from transformers import pipeline
     SUMMARIZER = pipeline("summarization")
 except Exception:
     SUMMARIZER = None
+
+import contextlib
+import io
+
+def safe_summarize(text, **kwargs):
+    """Run summarizer silently (no max_length warnings)."""
+    if SUMMARIZER is None:
+        return text[:300]  # fallback: truncate
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(buffer):
+        try:
+            result = safe_summarize(text, **kwargs)
+            return result[0]["summary_text"].strip()
+        except Exception:
+            return text[:300]
+
 
 # ---------- Tools ----------
 def search_news_rss(query, days=7, max_items=10):
@@ -75,23 +98,44 @@ def summarize_text(text, default_max=130):
     """Summarize text. Use HF pipeline if available, otherwise extractive fallback."""
     if not text:
         return ""
-    # Strip any stray HTML
+
+    # Clean stray HTML tags
     text = re.sub(r"<[^>]+>", "", text)
-    # If summarizer available, adapt max/min to input length
+
+    # Use model-based summarization if available
     if SUMMARIZER:
         try:
             input_len = max(1, len(text.split()))
-            # heuristic: want summary shorter than input
+            # heuristic: target a shorter summary than input
             max_len = min(default_max, max(30, int(input_len * 0.6)))
             min_len = max(12, int(max_len * 0.4))
-            out = SUMMARIZER(text, max_length=max_len, min_length=min_len, do_sample=False)
-            return out[0].get("summary_text", "").strip()
+            out = safe_summarize(
+                text,
+                max_length=max_len,
+                min_length=min_len,
+                do_sample=False
+            )
+
+            # Handle different possible return types safely
+            if isinstance(out, list):
+                result = out[0] if len(out) > 0 else ""
+                if isinstance(result, dict):
+                    return result.get("summary_text", "").strip()
+                elif isinstance(result, str):
+                    return result.strip()
+            elif isinstance(out, dict):
+                return out.get("summary_text", "").strip()
+            elif isinstance(out, str):
+                return out.strip()
+
         except Exception as e:
             print("[warn] summarizer failed:", e)
             # fall through to fallback
-    # Fallback: first 3 sentences (clean)
+
+    # Fallback: just grab the first 3 sentences
     sentences = re.split(r'(?<=[.!?]) +', text)
     return " ".join(sentences[:3]).strip()
+
 
 def generate_action_items(summary, n=5):
     """Extract candidate entities/topics and produce action items."""
@@ -159,13 +203,24 @@ class Reasoner:
 class ScoutAgent:
     def __init__(self, goal):
         self.goal = goal
-        self.planner = Planner(goal)
-        self.reasoner = Reasoner()
         self.context = {}
         self.log = []
+        self.reasoner = Reasoner()
+        self.planner = Planner(goal)
 
     def run(self):
         print(f"ScoutAgent starting on goal: {self.goal}")
+
+        # 🧠 Log which summarization model (if any) is active
+        if SUMMARIZER:
+            try:
+                print("[model] Using summarizer:", SUMMARIZER.model.name_or_path)
+            except AttributeError:
+                print("[model] Using summarizer: Transformer-based model (unknown name)")
+        else:
+            print("[model] Using fallback heuristic summarizer")
+
+        # 🧭 Agentic planning
         plan = self.planner.plan()
         self.context["plan"] = plan
         print(f"[agent] plan: {plan}")
@@ -188,6 +243,7 @@ class ScoutAgent:
                         continue
                 print("[agent] aborting remaining steps due to failure.")
                 break
+
 
         # Generate and save reports
         md = self.generate_markdown_report()
