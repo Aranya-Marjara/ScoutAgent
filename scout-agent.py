@@ -1,356 +1,399 @@
 #!/usr/bin/env python3
 """
-github:  https://github.com/Aranya-Marjara
-Features:
-- CLI goal input
-- Planner (decides a task plan based on the goal)
-- Search via Google News RSS
-- Fetch articles (best-effort)
-- Per-article summaries + Overall summary
-- Action-item extraction
-- Save both TXT and Markdown reports (timestamped)
-- Uses Hugging Face transformers summarizer if available, otherwise a simple fallback
+My news research scraper - ScoutAgent
+github.com/Aranya-Marjara
 
-Run:
-    python3 scout-agent.py "your topic here"
+Quick and dirty tool to research topics via news articles.
+Grabs recent news, summarizes key points, and suggests next steps.
+
+Usage:
+    python scout_agent.py "your research topic"
 """
+
 import warnings
 import logging
-
-# Suppress all unnecessary Hugging Face warnings & info logs
-warnings.filterwarnings("ignore", message=r".*max_length.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-logging.getLogger("transformers").setLevel(logging.ERROR)
-import transformers
-transformers.utils.logging.set_verbosity_error()
 from datetime import datetime
 import time
 import requests
 from bs4 import BeautifulSoup
-import json
 import re
-import random
 import os
 import sys
-# Optional summarizer (Hugging Face). If not installed, falls back to simple extractor.
+
+# Nuclear option for transformer warnings
+warnings.filterwarnings("ignore")
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
+
+# Suppress ALL warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Try to load summarizer, but it's optional
+summarizer = None
 try:
+    # Import with warnings suppressed
+    import transformers
+    transformers.logging.set_verbosity_error()
+    
     from transformers import pipeline
-    SUMMARIZER = pipeline("summarization")
-except Exception:
-    SUMMARIZER = None
+    # Suppress the specific max_length warning
+    warnings.filterwarnings("ignore", message=".*max_length.*")
+    warnings.filterwarnings("ignore", message=".*input_length.*")
+    
+    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+    
+except Exception as e:
+    print(f"Note: No summarizer available ({e}), using simple fallback")
+    summarizer = None
 
-import io
-import contextlib
-
-def safe_summarize(text, **kwargs):
-    """Run summarizer silently (no max_length warnings, )."""
-    if SUMMARIZER is None:
-        return text[:300]  # fallback: truncate
-
+def grab_news_search(query, days_back=7, max_results=10):
+    """Search Google News RSS for recent articles about the query."""
+    encoded_query = requests.utils.quote(query)
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}+when:{days_back}d&hl=en-US&gl=US&ceid=US:en"
+    
+    print(f"Searching: {rss_url}")
+    
     try:
-        # Redirect both stderr and stdout to null temporarily
-        with open(os.devnull, "w") as devnull:
-            old_stderr, old_stdout = sys.stderr, sys.stdout
-            sys.stderr, sys.stdout = devnull, devnull
-            try:
-                result = SUMMARIZER(text, **kwargs)
-            finally:
-                sys.stderr, sys.stdout = old_stderr, old_stdout
-        return result[0]["summary_text"].strip()
-    except Exception:
-        return text[:300]
-
-
-# Tools
-def search_news_rss(query, days=7, max_items=10):
-    """Fetch Google News RSS search results and return list of dicts {title, link, snippet}."""
-    q = requests.utils.quote(query)
-    url = f"https://news.google.com/rss/search?q={q}+when:7d&hl=en-US&gl=US&ceid=US:en"
-    print(f"[tool] fetching RSS: {url}")
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        print("[tool] RSS fetch failed:", e)
+        response = requests.get(rss_url, timeout=15)
+        response.raise_for_status()
+    except Exception as err:
+        print(f"Failed to fetch RSS: {err}")
         return []
-    soup = BeautifulSoup(r.text, "xml")
-    items = soup.find_all("item")[:max_items]
+    
+    soup = BeautifulSoup(response.text, 'xml')
+    items = soup.find_all('item')[:max_results]
+    
     results = []
-    for it in items:
-        title = it.title.text if it.title else "Untitled"
-        link = it.link.text if it.link else ""
-        desc = it.description.text if it.description else ""
-        desc = BeautifulSoup(desc, "html.parser").get_text()  # strip HTML
-        results.append({"title": title, "link": link, "snippet": desc})
+    for item in items:
+        title = item.title.text if item.title else "No title"
+        link = item.link.text if item.link else ""
+        # Clean up the description HTML
+        desc = item.description.text if item.description else ""
+        clean_desc = BeautifulSoup(desc, 'html.parser').get_text()
+        
+        results.append({
+            'title': title,
+            'link': link, 
+            'snippet': clean_desc
+        })
+    
     return results
 
-def fetch_article_text(url, max_chars=3000):
-    """Best-effort article text extraction using <p> tags."""
+def fetch_full_article(url, max_length=4000):
+    """Try to get the main article text from a URL."""
     if not url:
         return ""
+    
     try:
-        r = requests.get(url, timeout=8, headers={"User-Agent": "ScoutAgent/1.0"})
-        if r.status_code != 200:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        resp = requests.get(url, timeout=10, headers=headers)
+        if resp.status_code != 200:
             return ""
-        page = BeautifulSoup(r.text, "html.parser")
-        paragraphs = page.find_all("p")
-        text = "\n\n".join(p.get_text() for p in paragraphs)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:max_chars]
+            
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        paragraphs = soup.find_all('p')
+        text_chunks = [p.get_text().strip() for p in paragraphs if p.get_text().strip()]
+        full_text = "\n\n".join(text_chunks)
+        
+        # Clean up whitespace
+        full_text = re.sub(r'\s+', ' ', full_text)
+        return full_text[:max_length]
+        
     except Exception:
         return ""
 
-def summarize_text(text, default_max=130):
-    """Summarize text. Use HF pipeline if available, otherwise extractive fallback."""
-    if not text:
-        return ""
-
-    # Clean HTML tags
-    text = re.sub(r"<[^>]+>", "", text)
-
-    # Use model-based summarization if available
-    if SUMMARIZER:
+def smart_summarize(text, target_length=150):
+    """Summarize text using transformer if available, else use simple method."""
+    if not text or len(text) < 50:
+        return text
+    
+    # If we have the fancy summarizer, use it
+    if summarizer:
         try:
-            input_len = max(1, len(text.split()))
-            # heuristic: target a shorter summary than input
-            max_len = min(default_max, max(30, int(input_len * 0.6)))
-            min_len = max(12, int(max_len * 0.4))
-            out = safe_summarize(
-                text,
-                max_length=max_len,
-                min_length=min_len,
-                do_sample=False
-            )
-
-            # Handle different possible return types safely
-            if isinstance(out, list):
-                result = out[0] if len(out) > 0 else ""
-                if isinstance(result, dict):
-                    return result.get("summary_text", "").strip()
-                elif isinstance(result, str):
-                    return result.strip()
-            elif isinstance(out, dict):
-                return out.get("summary_text", "").strip()
-            elif isinstance(out, str):
-                return out.strip()
-
-        except Exception as e:
-            print("[warn] summarizer failed:", e)
-            # fall through to fallback
-
-    # Fallback: just grab the first 3 sentences
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    return " ".join(sentences[:3]).strip()
-
-
-def generate_action_items(summary, n=5):
-    """Extract candidate entities/topics and produce action items."""
-    # Extract capitalized multiword phrases as candidate entities
-    entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', summary)
-    stopwords = {"Title", "Summary", "Link", "Overall", "The", "A", "An", "Investigate", "Report"}
-    keywords = [w for w in dict.fromkeys(entities) if w.split()[0] not in stopwords]
-    # If none, use common topic words from summary (lowercase nouns)
-    if not keywords:
-        cand = re.findall(r'\b([a-z]{4,})\b', summary.lower())
-        cand = [c for c in dict.fromkeys(cand) if c not in {"this","that","have","will"}]
-        keywords = cand[:n] if cand else ["key topics"]
-    items = []
-    for i, kw in enumerate(keywords[:n], 1):
-        items.append(f"{i}. Investigate recent updates related to {kw.strip()}.")
-    return "\n".join(items)
-
-# FILE SAVING HELPERS.
-def save_text_report(report_text, filename=None):
-    if not filename:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"report_{ts}.txt"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(report_text)
-    print(f"[file] saved text report: {os.path.abspath(filename)}")
-    return filename
-
-def save_markdown_report(md_text, filename=None):
-    if not filename:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"report_{ts}.md"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(md_text)
-    print(f"[file] saved markdown report: {os.path.abspath(filename)}")
-    return filename
-
-# -Planner and Reasoner
-class Planner:
-    def __init__(self, goal):
-        self.goal = goal
-
-    def plan(self):
-        """Return ordered list of tasks based on goal keywords."""
-        g = self.goal.lower()
-        if any(k in g for k in ("news", "latest", "headlines")):
-            return ["search", "fetch", "summarize", "actions", "save"]
-        if any(k in g for k in ("analyze", "analysis", "report")):
-            return ["fetch", "summarize", "actions", "save"]
-        # default sensible plan
-        return ["search", "fetch", "summarize", "actions", "save"]
-
-class Reasoner:
-    def __init__(self, max_retries=2):
-        self.retries = {}
-        self.max_retries = max_retries
-
-    def record_failure(self, name):
-        self.retries[name] = self.retries.get(name, 0) + 1
-        return self.retries[name] <= self.max_retries
-
-    def decide_expansion(self, search_results):
-        return len(search_results) == 0
-
-# Agent
-class ScoutAgent:
-    def __init__(self, goal):
-        self.goal = goal
-        self.context = {}
-        self.log = []
-        self.reasoner = Reasoner()
-        self.planner = Planner(goal)
-
-    def run(self):
-        print(f"ScoutAgent starting on goal: {self.goal}")
-
-        # Log which summarization model (if any) is active
-        if SUMMARIZER:
+            # Figure out reasonable lengths based on input
+            word_count = len(text.split())
+            
+            # Don't summarize if text is too short
+            if word_count < 10:
+                return text
+            
+            max_len = min(target_length, max(30, int(word_count * 0.6)))
+            min_len = max(10, int(max_len * 0.3))
+            
+            # Make sure we're not asking for longer output than input
+            if max_len > word_count:
+                max_len = max(10, word_count - 5)
+                min_len = max(5, int(max_len * 0.5))
+            
+            # Nuclear option: redirect ALL output
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            sys.stdout = open(os.devnull, 'w')
+            sys.stderr = open(os.devnull, 'w')
+            
             try:
-                print("[model] Using summarizer:", SUMMARIZER.model.name_or_path)
-            except AttributeError:
-                print("[model] Using summarizer: Transformer-based model (unknown name)")
+                result = summarizer(text, max_length=max_len, min_length=min_len, do_sample=False)
+            finally:
+                sys.stdout.close()
+                sys.stderr.close()
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+            
+            if isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], dict):
+                    return result[0].get('summary_text', '').strip()
+                return str(result[0]).strip()
+            return text[:300]  # Fallback
+            
+        except Exception as e:
+            # Don't print the error to avoid more noise
+            pass
+    
+    # Simple method: first few sentences
+    sentences = re.split(r'[.!?]+', text)
+    clean_sentences = [s.strip() for s in sentences if s.strip()]
+    return ' '.join(clean_sentences[:3]).strip()
+
+def generate_follow_up_ideas(summary_text, num_items=5):
+    """Generate some follow-up research ideas from the summary."""
+    # Look for proper nouns and key phrases
+    big_words = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', summary_text)
+    
+    # Filter out common words
+    skip_words = {'The', 'A', 'An', 'This', 'That', 'We', 'You', 'I'}
+    interesting_words = [word for word in big_words if word.split()[0] not in skip_words]
+    
+    # Remove duplicates but keep order
+    seen = set()
+    unique_words = []
+    for word in interesting_words:
+        if word not in seen:
+            seen.add(word)
+            unique_words.append(word)
+    
+    # If we didn't find good proper nouns, use important sounding words
+    if not unique_words:
+        words = summary_text.lower().split()
+        important = [w for w in words if len(w) > 5 and w not in ['about', 'because', 'however']]
+        unique_words = list(dict.fromkeys(important))[:num_items]
+    
+    actions = []
+    for i, topic in enumerate(unique_words[:num_items], 1):
+        actions.append(f"{i}. Look into recent developments about {topic}")
+    
+    return "\n".join(actions)
+
+def save_report(content, filename=None, format='txt'):
+    """Save report to file with timestamp."""
+    if not filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"research_{timestamp}.{format}"
+    
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    print(f"Saved: {os.path.abspath(filename)}")
+    return filename
+
+class TaskPlanner:
+    """Figures out what steps to take based on the research goal."""
+    def __init__(self, goal):
+        self.goal = goal.lower()
+    
+    def get_steps(self):
+        """Return the steps needed for this type of research."""
+        if any(word in self.goal for word in ['news', 'latest', 'update', 'recent']):
+            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
+        elif any(word in self.goal for word in ['analyze', 'research', 'study']):
+            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
         else:
-            print("[model] Using fallback heuristic summarizer")
+            # Default plan
+            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
 
-        #  Agentic planning
-        plan = self.planner.plan()
-        self.context["plan"] = plan
-        print(f"[agent] plan: {plan}")
-
-        for step in plan:
-            print(f"[agent] executing step: {step}")
-            ok = self.execute_task(step)
-            if ok:
-                self.log.append(f"{step} succeeded")
+class ResearchAgent:
+    """Main class that runs the research process."""
+    
+    def __init__(self, research_goal):
+        self.goal = research_goal
+        self.data = {}  # Store our findings
+        self.steps_log = []
+        self.planner = TaskPlanner(research_goal)
+    
+    def run_research(self):
+        """Run the complete research process."""
+        print(f"Starting research: {self.goal}")
+        print(f"Summarizer: {'Available' if summarizer else 'Basic fallback'}")
+        
+        steps = self.planner.get_steps()
+        print(f"Plan: {steps}")
+        
+        for step in steps:
+            print(f"-> Step: {step}")
+            success = self._do_step(step)
+            
+            if success:
+                self.steps_log.append(f"✓ {step}")
             else:
-                self.log.append(f"{step} failed")
-                # allow reasoner to decide retry/expand when appropriate
-                if step == "search" and self.reasoner.record_failure(step):
-                    print("[agent] retrying search with broadened query")
-                    # broaden query and retry one time
-                    self.goal = self.goal + " policy OR regulation"
-                    ok = self.execute_task("search")
-                    if ok:
-                        self.log.append("search (broadened) succeeded")
+                self.steps_log.append(f"✗ {step}")
+                # For search failures, try a broader search
+                if step == 'search':
+                    print("Trying broader search...")
+                    self.goal += " news"
+                    success = self._do_step('search')
+                    if success:
+                        self.steps_log.append("✓ search (broadened)")
                         continue
-                print("[agent] aborting remaining steps due to failure.")
+                print("Stopping due to failure")
                 break
-
-
-        # Generate and save reports
-        md = self.generate_markdown_report()
-        txt = self.generate_text_report()
-        md_file = save_markdown_report(md)
-        txt_file = save_text_report(txt)
-        return {"md": md_file, "txt": txt_file}
-
-    def execute_task(self, task_name):
-        if task_name == "search":
-            results = search_news_rss(self.goal, days=7, max_items=8)
-            self.context["search_results"] = results
+        
+        # Save our findings
+        text_report = self._make_text_report()
+        md_report = self._make_markdown_report()
+        
+        txt_file = save_report(text_report, format='txt')
+        md_file = save_report(md_report, format='md')
+        
+        return {'text': txt_file, 'markdown': md_file}
+    
+    def _do_step(self, step_name):
+        """Execute a single step of the research."""
+        if step_name == 'search':
+            results = grab_news_search(self.goal)
+            self.data['articles_found'] = results
             return len(results) > 0
-
-        if task_name == "fetch":
-            results = self.context.get("search_results", [])
-            articles = []
-            for it in results:
-                text = fetch_article_text(it.get("link", ""))
-                if not text:
-                    text = it.get("snippet", "")
-                articles.append({"meta": it, "text": text})
-            self.context["articles"] = articles
-            return len(articles) > 0
-
-        if task_name == "summarize":
-            arts = self.context.get("articles", [])
-            detailed = []
-            all_summaries = []
-            for art in arts[:5]:
-                title = art["meta"].get("title", "Untitled")
-                link = art["meta"].get("link", "")
-                text = art.get("text", "")
-                short = summarize_text(text)
-                detailed.append({"title": title, "link": link, "summary": short})
-                all_summaries.append(short)
-            overall = summarize_text(" ".join(all_summaries)) if all_summaries else ""
-            self.context["detailed_summaries"] = detailed
-            self.context["overall_summary"] = overall
-            return len(detailed) > 0
-
-        if task_name == "actions":
-            # generate action items from overall summary + detailed summaries
-            overall = self.context.get("overall_summary", "")
-            details_text = " ".join(d["summary"] for d in self.context.get("detailed_summaries", []))
-            seed_text = overall + " " + details_text
-            items = generate_action_items(seed_text, n=5)
-            self.context["actions"] = items
-            return bool(items)
-
-        if task_name == "save":
-            # prepare final report in context; actual writing is done in run()
+        
+        elif step_name == 'fetch':
+            articles = self.data.get('articles_found', [])
+            detailed_articles = []
+            
+            for article in articles:
+                url = article.get('link', '')
+                full_text = fetch_full_article(url)
+                # If we can't get full text, use the snippet
+                if not full_text:
+                    full_text = article.get('snippet', '')[:1000]
+                
+                detailed_articles.append({
+                    'info': article,
+                    'content': full_text
+                })
+            
+            self.data['articles_with_content'] = detailed_articles
+            return len(detailed_articles) > 0
+        
+        elif step_name == 'summarize':
+            articles = self.data.get('articles_with_content', [])
+            summaries = []
+            all_summary_text = []
+            
+            for article in articles[:6]:  # Limit to 6 articles
+                title = article['info'].get('title', 'Untitled')
+                link = article['info'].get('link', '')
+                content = article['content']
+                
+                summary = smart_summarize(content)
+                summaries.append({
+                    'title': title,
+                    'link': link,
+                    'summary': summary
+                })
+                all_summary_text.append(summary)
+            
+            # Create overall summary
+            combined_text = " ".join(all_summary_text)
+            overall = smart_summarize(combined_text, 200) if combined_text else "No summary available"
+            
+            self.data['article_summaries'] = summaries
+            self.data['big_picture'] = overall
             return True
-
+        
+        elif step_name == 'suggest_actions':
+            overall = self.data.get('big_picture', '')
+            details_text = " ".join([s['summary'] for s in self.data.get('article_summaries', [])])
+            combined = overall + " " + details_text
+            
+            actions = generate_follow_up_ideas(combined, 5)
+            self.data['next_steps'] = actions
+            return True
+        
+        elif step_name == 'save':
+            return True  # We'll handle saving separately
+        
         return False
-
-    def generate_text_report(self):
-        # Create a human-readable plain text report
-        goal = self.goal
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    def _make_text_report(self):
+        """Create a plain text version of the report."""
         lines = []
-        lines.append(f"Goal: {goal}")
-        lines.append(f"Time: {ts}")
-        lines.append("\n---\n")
-        lines.append("Detailed Summaries:\n")
-        for i, d in enumerate(self.context.get("detailed_summaries", []), 1):
-            lines.append(f"{i}. {d['title']}")
-            lines.append(f"Link: {d['link']}")
-            lines.append(f"Summary: {d['summary']}\n")
-        lines.append("\nOverall Summary:\n" + (self.context.get("overall_summary", "") or ""))
-        lines.append("\nAction Items:\n" + (self.context.get("actions", "") or ""))
-        lines.append("\nAgent log:\n" + "\n".join(self.log))
+        lines.append(f"RESEARCH REPORT")
+        lines.append(f"Topic: {self.goal}")
+        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        lines.append("=" * 50)
+        
+        lines.append("\nKEY FINDINGS:")
+        lines.append(self.data.get('big_picture', 'No summary available'))
+        
+        lines.append("\nDETAILED SUMMARIES:")
+        for i, article in enumerate(self.data.get('article_summaries', []), 1):
+            lines.append(f"\n{i}. {article['title']}")
+            lines.append(f"   Link: {article['link']}")
+            lines.append(f"   Summary: {article['summary']}")
+        
+        lines.append("\nNEXT RESEARCH STEPS:")
+        lines.append(self.data.get('next_steps', 'No suggestions generated'))
+        
+        lines.append("\nPROCESS LOG:")
+        lines.append("\n".join(self.steps_log))
+        
+        return "\n".join(lines)
+    
+    def _make_markdown_report(self):
+        """Create a markdown version of the report."""
+        lines = []
+        lines.append(f"# Research Report: {self.goal}")
+        lines.append(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+        lines.append("")
+        
+        lines.append("## Executive Summary")
+        lines.append(self.data.get('big_picture', 'No summary available'))
+        lines.append("")
+        
+        lines.append("## Detailed Findings")
+        for i, article in enumerate(self.data.get('article_summaries', []), 1):
+            lines.append(f"### {i}. {article['title']}")
+            lines.append(f"[Source]({article['link']})  ")
+            lines.append(f"{article['summary']}  ")
+            lines.append("")
+        
+        lines.append("## Recommended Next Steps")
+        lines.append(self.data.get('next_steps', 'No suggestions generated'))
+        lines.append("")
+        
+        lines.append("## Research Process")
+        lines.append("```")
+        lines.append("\n".join(self.steps_log))
+        lines.append("```")
+        
         return "\n".join(lines)
 
-    def generate_markdown_report(self):
-        goal = self.goal
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        md = []
-        md.append(f"# ScoutAgent Report")
-        md.append(f"**Goal:** {goal}  ")
-        md.append(f"**Time:** {ts}  \n---\n")
-        md.append("## Detailed Summaries\n")
-        for i, d in enumerate(self.context.get("detailed_summaries", []), 1):
-            md.append(f"### {i}. {d['title']}")
-            md.append(f"[Source]({d['link']})  \n")
-            md.append(f"{d['summary']}  \n")
-        md.append("## Overall Summary\n")
-        md.append(self.context.get("overall_summary", "") or "No overall summary available.")
-        md.append("\n## Action Items\n")
-        md.append(self.context.get("actions", "") or "No action items generated.")
-        md.append("\n## Agent Log\n")
-        md.append("```\n" + "\n".join(self.log) + "\n```")
-        md.append("\n*Generated autonomously by ScoutAgent.*")
-        return "\n\n".join(md)
-
-# Command Line Interface
 def main():
-    goal = sys.argv[1] if len(sys.argv) > 1 else "AI regulation"
-    agent = ScoutAgent(goal)
-    res = agent.run()
-    print("Done. Reports:", res)
+    """Main entry point."""
+    if len(sys.argv) < 2:
+        print("Usage: python scout_agent.py 'research topic'")
+        print("Example: python scout_agent.py 'AI regulation'")
+        sys.exit(1)
+    
+    topic = " ".join(sys.argv[1:])
+    agent = ResearchAgent(topic)
+    results = agent.run_research()
+    
+    print(f"\nResearch complete! Check:")
+    print(f"  - {results['text']}")
+    print(f"  - {results['markdown']}")
 
 if __name__ == "__main__":
     main()
