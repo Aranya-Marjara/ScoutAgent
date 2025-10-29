@@ -49,7 +49,7 @@ def safe_summarize(text, **kwargs):
     buffer = io.StringIO()
     with contextlib.redirect_stderr(buffer):
         try:
-            result = safe_summarize(text, **kwargs)
+            result = SUMMARIZER(text, **kwargs)
             return result[0]["summary_text"].strip()
         except Exception:
             return text[:300]
