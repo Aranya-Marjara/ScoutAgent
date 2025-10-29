@@ -21,7 +21,8 @@ import logging
 warnings.filterwarnings("ignore", message=r".*max_length.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 logging.getLogger("transformers").setLevel(logging.ERROR)
-
+import transformers
+transformers.utils.logging.set_verbosity_error()
 from datetime import datetime
 import time
 import requests
@@ -38,21 +39,28 @@ try:
 except Exception:
     SUMMARIZER = None
 
-import contextlib
 import io
+import contextlib
+import os
+import sys
 
 def safe_summarize(text, **kwargs):
-    """Run summarizer silently (no max_length warnings)."""
+    """Run summarizer silently (no max_length warnings, )."""
     if SUMMARIZER is None:
         return text[:300]  # fallback: truncate
 
-    buffer = io.StringIO()
-    with contextlib.redirect_stderr(buffer):
-        try:
-            result = safe_summarize(text, **kwargs) #
-            return result[0]["summary_text"].strip()
-        except Exception:
-            return text[:300]
+    try:
+        # Redirect both stderr and stdout to null temporarily
+        with open(os.devnull, "w") as devnull:
+            old_stderr, old_stdout = sys.stderr, sys.stdout
+            sys.stderr, sys.stdout = devnull, devnull
+            try:
+                result = SUMMARIZER(text, **kwargs)
+            finally:
+                sys.stderr, sys.stdout = old_stderr, old_stdout
+        return result[0]["summary_text"].strip()
+    except Exception:
+        return text[:300]
 
 
 # ---------- Tools ----------
