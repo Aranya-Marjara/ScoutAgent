@@ -5,7 +5,6 @@
 ### *Autonomous News Intelligence Assistant*
 
 [![Python](https://img.shields.io/badge/Made%20with-Python-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![AI](https://img.shields.io/badge/Powered%20by-AI%20Summarization-ff69b4?logo=openai&logoColor=white)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Autonomous](https://img.shields.io/badge/Mode-Fully%20Autonomous-blueviolet?logo=robotframework&logoColor=white)]()
 
