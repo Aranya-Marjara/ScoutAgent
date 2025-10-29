@@ -30,7 +30,19 @@ analyzing the world in real-time so you don’t have to.*
 
 ---
 
-## 🧠 **Example Usage**
+## 🧠 **Setup and Usage**
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/your-username/scoutagent.git
+cd scoutagent
+
+# 2. Create a virtual environment (optional but recommended)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Run ScoutAgent with your query
 python3 scout-agent.py "AI regulation"
