@@ -12,7 +12,7 @@ Features:
 - Uses Hugging Face transformers summarizer if available, otherwise a simple fallback
 
 Run:
-    python3 agent.py "your topic here"
+    python3 scout-agent.py "your topic here"
 """
 
 from datetime import datetime
