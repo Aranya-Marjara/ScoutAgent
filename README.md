@@ -12,7 +12,7 @@
 ---
 
 🚀 *ScoutAgent automatically searches, summarizes, and generates insights from the latest news —  
-analyzing the world in real-time so you don’t have to.*
+analyzing the world’s recent developments so you don’t have to.*
 
 </div>
 
