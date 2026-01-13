@@ -4,3 +4,4 @@ transformers
 torch
 nltk
 lxml
+trafilatura
