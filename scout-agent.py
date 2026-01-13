@@ -1,399 +1,650 @@
 #!/usr/bin/env python3
 """
-My news research scraper - ScoutAgent
-github.com/Aranya-Marjara
+ScoutAgent - News research automation tool
+Author: github.com/Aranya-Marjara
 
-Quick tool to research topics via news articles.
-Grabs recent news, summarizes key points, and suggests next steps.
+Crawls recent news, extracts actual content, and generates research reports.
+Actually reads the articles, not just headlines.
 
 Usage:
-    python3 scout-agent.py "your research topic"
+    ./scout_agent.py "your topic here"
+    ./scout_agent.py "AI policy changes" --days 14
 """
 
 import warnings
 import logging
+import argparse
 from datetime import datetime
-import time
 import requests
 from bs4 import BeautifulSoup
 import re
 import os
 import sys
+import json
+from urllib.parse import urlparse, quote, unquote
+import time
+import base64
 
-# Nuclear option for transformer warnings
+# Kill the *FISHING noise
 warnings.filterwarnings("ignore")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("torch").setLevel(logging.ERROR)
+for logger_name in ['transformers', 'torch', 'tensorflow']:
+    logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
-# Suppress ALL warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-# Try to load summarizer, but it's optional
-summarizer = None
+# Optional dependencies
 try:
-    # Import with warnings suppressed
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
+
+try:
+    from transformers import pipeline
     import transformers
     transformers.logging.set_verbosity_error()
     
-    from transformers import pipeline
-    # Suppress the specific max_length warning
-    warnings.filterwarnings("ignore", message=".*max_length.*")
-    warnings.filterwarnings("ignore", message=".*input_length.*")
-    
-    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-    
-except Exception as e:
-    print(f"Note: No summarizer available ({e}), using simple fallback")
-    summarizer = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        SUMMARIZER = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+except Exception:
+    SUMMARIZER = None
 
-def grab_news_search(query, days_back=7, max_results=10):
-    """Search Google News RSS for recent articles about the query."""
-    encoded_query = requests.utils.quote(query)
-    rss_url = f"https://news.google.com/rss/search?q={encoded_query}+when:{days_back}d&hl=en-US&gl=US&ceid=US:en"
-    
-    print(f"Searching: {rss_url}")
+# Config
+USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+REQUEST_TIMEOUT = 15
+MAX_ARTICLE_LENGTH = 6000
+CACHE_DIR = '.scout_cache'
+RATE_LIMIT_DELAY = 0.8
+
+def setup_cache():
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+def get_cache_path(url):
+    from hashlib import md5
+    url_hash = md5(url.encode()).hexdigest()
+    return os.path.join(CACHE_DIR, f"{url_hash}.txt")
+
+def load_from_cache(url):
+    cache_path = get_cache_path(url)
+    if os.path.exists(cache_path):
+        if (datetime.now().timestamp() - os.path.getmtime(cache_path)) < 86400:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return f.read()
+    return None
+
+def save_to_cache(url, content):
+    cache_path = get_cache_path(url)
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+def resolve_google_news_url(google_url):
+    """
+    Follows Google News RSS redirect URLs to get the actual article URL.
+    Returns the original URL if it’s not a Google News link.
+    """
+    if not google_url or 'google.com' not in google_url:
+        return google_url
+
+    try:
+        resp = requests.get(
+            google_url,
+            allow_redirects=True,
+            timeout=10,
+            headers={'User-Agent': USER_AGENT}
+        )
+        return resp.url
+    except Exception:
+        return None
+
+
+def decode_google_news_url(encoded_url):
+    """
+    Google News RSS URLs are obfuscated. This tries to decode them.
+    The URL contains base64 encoded data with the real URL.
+    """
+    if not encoded_url or 'news.google.com' not in encoded_url:
+        return encoded_url
     
     try:
-        response = requests.get(rss_url, timeout=15)
-        response.raise_for_status()
-    except Exception as err:
-        print(f"Failed to fetch RSS: {err}")
+        # Extract the base64 part from the URL
+        # Format: https://news.google.com/rss/articles/CBMi...?oc=5
+        if '/articles/' in encoded_url:
+            parts = encoded_url.split('/articles/')
+            if len(parts) > 1:
+                encoded_part = parts[1].split('?')[0]
+                
+                # The encoded part starts with CBM or similar prefix
+                # Try to decode it
+                try:
+                    # Remove the prefix (usually CBMi, CBMi, etc)
+                    if len(encoded_part) > 4:
+                        base64_data = encoded_part[4:]  # Skip prefix
+                        
+                        # Add padding if needed
+                        padding = 4 - (len(base64_data) % 4)
+                        if padding and padding != 4:
+                            base64_data += '=' * padding
+                        
+                        decoded = base64.urlsafe_b64decode(base64_data).decode('utf-8', errors='ignore')
+                        
+                        # Look for URLs in the decoded data
+                        url_match = re.search(r'https?://[^\s<>"]+', decoded)
+                        if url_match:
+                            return url_match.group(0)
+                except Exception:
+                    pass
+        
+        # Fallback: try to follow the redirect
+        try:
+            session = requests.Session()
+            session.max_redirects = 10
+            resp = session.head(encoded_url, allow_redirects=True, timeout=10,
+                              headers={'User-Agent': USER_AGENT})
+            
+            # Check if we got redirected away from google.com
+            if 'google.com' not in resp.url:
+                return resp.url
+        except Exception:
+            pass
+            
+    except Exception:
+        pass
+    
+    return None
+
+def search_news(query, days_back=7, max_results=12):
+    """Search Google News RSS"""
+    encoded = quote(query)
+    rss_url = f"https://news.google.com/rss/search?q={encoded}+when:{days_back}d&hl=en-US&gl=US&ceid=US:en"
+    
+    try:
+        resp = requests.get(rss_url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"RSS fetch failed: {e}")
         return []
     
-    soup = BeautifulSoup(response.text, 'xml')
+    soup = BeautifulSoup(resp.text, 'xml')
     items = soup.find_all('item')[:max_results]
     
-    results = []
+    articles = []
     for item in items:
-        title = item.title.text if item.title else "No title"
-        link = item.link.text if item.link else ""
-        # Clean up the description HTML
-        desc = item.description.text if item.description else ""
-        clean_desc = BeautifulSoup(desc, 'html.parser').get_text()
+        title = item.title.text if item.title else "Unknown"
+        google_link = item.link.text if item.link else ""
         
-        results.append({
+        desc = item.description.text if item.description else ""
+        snippet = BeautifulSoup(desc, 'html.parser').get_text().strip()
+        
+        # Try to decode the Google News URL
+        real_url = decode_google_news_url(google_link)
+        
+        articles.append({
             'title': title,
-            'link': link, 
-            'snippet': clean_desc
+            'url': real_url if real_url else google_link,
+            'snippet': snippet,
+            'decoded': real_url is not None
         })
+        
+        time.sleep(0.1)
     
-    return results
+    return articles
 
-def fetch_full_article(url, max_length=4000):
-    """Try to get the main article text from a URL."""
-    if not url:
+def extract_with_trafilatura(html_content):
+    if not TRAFILATURA_AVAILABLE:
+        return None
+    
+    try:
+        extracted = trafilatura.extract(html_content, include_comments=False, 
+                                       include_tables=False)
+        if extracted and len(extracted) > 300:
+            return extracted
+    except Exception:
+        pass
+    return None
+
+def extract_with_beautifulsoup(html_content):
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Remove junk
+        for element in soup(['script', 'style', 'nav', 'header', 'footer', 
+                            'aside', 'iframe', 'noscript', 'svg']):
+            element.decompose()
+        
+        # Try common article containers
+        article_containers = soup.find_all(['article', 'div'], 
+                                          class_=re.compile(r'article|content|post|entry|story', re.I))
+        
+        if article_containers:
+            paragraphs = []
+            for container in article_containers[:3]:
+                for p in container.find_all('p'):
+                    text = p.get_text().strip()
+                    if len(text) > 50:
+                        paragraphs.append(text)
+            
+            if paragraphs:
+                full_text = '\n\n'.join(paragraphs)
+                full_text = re.sub(r'\s+', ' ', full_text)
+                return full_text
+        
+        # Fallback: all paragraphs
+        paragraphs = []
+        for p in soup.find_all('p'):
+            text = p.get_text().strip()
+            if len(text) > 50:
+                paragraphs.append(text)
+        
+        if len(paragraphs) > 2:
+            full_text = '\n\n'.join(paragraphs)
+            full_text = re.sub(r'\s+', ' ', full_text)
+            return full_text
+        
+    except Exception:
+        pass
+    
+    return None
+
+def extract_article_text(url, verbose=False):
+    if not url or 'google.com' in url:
         return ""
+    
+    cached = load_from_cache(url)
+    if cached:
+        if verbose:
+            print(f"    [cache]")
+        return cached
     
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-        resp = requests.get(url, timeout=10, headers=headers)
+        
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers, allow_redirects=True)
+        
         if resp.status_code != 200:
+            if verbose:
+                print(f"    [HTTP {resp.status_code}]")
             return ""
-            
-        soup = BeautifulSoup(resp.content, 'html.parser')
-        paragraphs = soup.find_all('p')
-        text_chunks = [p.get_text().strip() for p in paragraphs if p.get_text().strip()]
-        full_text = "\n\n".join(text_chunks)
         
-        # Clean up whitespace
-        full_text = re.sub(r'\s+', ' ', full_text)
-        return full_text[:max_length]
+        html_content = resp.content
         
-    except Exception:
-        return ""
+        # Try trafilatura
+        extracted = extract_with_trafilatura(html_content)
+        if extracted:
+            if verbose:
+                print(f"    [trafilatura: {len(extracted)} chars]")
+            save_to_cache(url, extracted)
+            return extracted[:MAX_ARTICLE_LENGTH]
+        
+        # Try BeautifulSoup
+        extracted = extract_with_beautifulsoup(html_content)
+        if extracted and len(extracted) > 300:
+            if verbose:
+                print(f"    [bs4: {len(extracted)} chars]")
+            save_to_cache(url, extracted)
+            return extracted[:MAX_ARTICLE_LENGTH]
+        
+        if verbose:
+            print(f"    [too short]")
+        
+    except requests.Timeout:
+        if verbose:
+            print(f"    [timeout]")
+    except requests.RequestException as e:
+        if verbose:
+            print(f"    [{type(e).__name__}]")
+    except Exception as e:
+        if verbose:
+            print(f"    [error: {type(e).__name__}]")
+    
+    return ""
 
-def smart_summarize(text, target_length=150):
-    """Summarize text using transformer if available, else use simple method."""
-    if not text or len(text) < 50:
+def summarize_text(text, max_len=150):
+    if not text or len(text) < 100:
         return text
     
-    # If we have the fancy summarizer, use it
-    if summarizer:
+    if SUMMARIZER:
         try:
-            # Figure out reasonable lengths based on input
-            word_count = len(text.split())
+            words = text.split()
+            word_count = len(words)
             
-            # Don't summarize if text is too short
-            if word_count < 10:
+            if word_count < 50:
                 return text
             
-            max_len = min(target_length, max(30, int(word_count * 0.6)))
-            min_len = max(10, int(max_len * 0.3))
+            target_max = min(max_len, int(word_count * 0.5))
+            target_min = max(30, int(target_max * 0.4))
             
-            # Make sure we're not asking for longer output than input
-            if max_len > word_count:
-                max_len = max(10, word_count - 5)
-                min_len = max(5, int(max_len * 0.5))
+            if target_max > word_count:
+                target_max = word_count - 10
+                target_min = max(20, int(target_max * 0.5))
             
-            # Nuclear option: redirect ALL output
-            original_stdout = sys.stdout
-            original_stderr = sys.stderr
-            sys.stdout = open(os.devnull, 'w')
-            sys.stderr = open(os.devnull, 'w')
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = open(os.devnull, 'w')
             
             try:
-                result = summarizer(text, max_length=max_len, min_length=min_len, do_sample=False)
+                result = SUMMARIZER(text, max_length=target_max, min_length=target_min, do_sample=False)
             finally:
                 sys.stdout.close()
                 sys.stderr.close()
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
+                sys.stdout, sys.stderr = old_stdout, old_stderr
             
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], dict):
-                    return result[0].get('summary_text', '').strip()
-                return str(result[0]).strip()
-            return text[:300]  # Fallback
-            
-        except Exception as e:
-            # Don't print the error to avoid more noise
+            if result and isinstance(result, list) and len(result) > 0:
+                summary = result[0].get('summary_text', '')
+                if summary:
+                    return summary.strip()
+        
+        except Exception:
             pass
     
-    # Simple method: first few sentences
-    sentences = re.split(r'[.!?]+', text)
-    clean_sentences = [s.strip() for s in sentences if s.strip()]
-    return ' '.join(clean_sentences[:3]).strip()
+    # Manual fallback
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 20]
+    
+    if not sentences:
+        words = text.split()
+        return ' '.join(words[:50]) + '...'
+    
+    return '. '.join(sentences[:3]) + '.'
 
-def generate_follow_up_ideas(summary_text, num_items=5):
-    """Generate some follow-up research ideas from the summary."""
-    # Look for proper nouns and key phrases
-    big_words = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', summary_text)
+def extract_research_leads(text, count=5):
+    proper_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text)
     
-    # Filter out common words
-    skip_words = {'The', 'A', 'An', 'This', 'That', 'We', 'You', 'I'}
-    interesting_words = [word for word in big_words if word.split()[0] not in skip_words]
+    boring_words = {'The', 'This', 'That', 'These', 'Those', 'There', 'Here', 'What', 
+                    'When', 'Where', 'Why', 'How', 'Who', 'Which', 'While', 'During',
+                    'Baker', 'Services', 'Law', 'Monitor', 'Legal', 'Federal', 'National'}
     
-    # Remove duplicates but keep order
+    interesting = []
     seen = set()
-    unique_words = []
-    for word in interesting_words:
-        if word not in seen:
-            seen.add(word)
-            unique_words.append(word)
     
-    # If we didn't find good proper nouns, use important sounding words
-    if not unique_words:
-        words = summary_text.lower().split()
-        important = [w for w in words if len(w) > 5 and w not in ['about', 'because', 'however']]
-        unique_words = list(dict.fromkeys(important))[:num_items]
+    for noun in proper_nouns:
+        first_word = noun.split()[0]
+        if first_word not in boring_words and noun not in seen and len(noun) > 3:
+            seen.add(noun)
+            interesting.append(noun)
     
-    actions = []
-    for i, topic in enumerate(unique_words[:num_items], 1):
-        actions.append(f"{i}. Look into recent developments about {topic}")
+    # Also look for technical terms
+    if len(interesting) < count:
+        words = [w.strip('.,;:') for w in text.split()]
+        technical = [w for w in words if len(w) > 8 and w[0].islower() and w.isalnum()]
+        for word in technical:
+            if word not in seen and len(interesting) < count * 2:
+                seen.add(word)
+                interesting.append(word)
     
-    return "\n".join(actions)
+    leads = []
+    for i, topic in enumerate(interesting[:count], 1):
+        leads.append(f"{i}. Investigate recent developments in {topic}")
+    
+    return '\n'.join(leads) if leads else "No specific leads identified - try broader search"
 
-def save_report(content, filename=None, format='txt'):
-    """Save report to file with timestamp."""
-    if not filename:
+class Reporter:
+    def __init__(self, topic, articles, summaries, overview, next_steps, stats):
+        self.topic = topic
+        self.articles = articles
+        self.summaries = summaries
+        self.overview = overview
+        self.next_steps = next_steps
+        self.stats = stats
+    
+    def as_text(self):
+        lines = [
+            "=" * 70,
+            f"SCOUT AGENT RESEARCH REPORT",
+            f"Topic: {self.topic}",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 70,
+            "",
+            "OVERVIEW:",
+            self.overview,
+            "",
+            "=" * 70,
+            "ARTICLE SUMMARIES:",
+            ""
+        ]
+        
+        for i, item in enumerate(self.summaries, 1):
+            status = "✓ Full text" if item['extracted'] else "⚠ Snippet only"
+            lines.extend([
+                f"{i}. {item['title']}",
+                f"   URL: {item['url']}",
+                f"   Status: {status}",
+                "",
+                f"   {item['summary']}",
+                ""
+            ])
+        
+        extraction_rate = (self.stats['extracted']/self.stats['found']*100) if self.stats['found'] > 0 else 0
+        
+        lines.extend([
+            "=" * 70,
+            "NEXT RESEARCH STEPS:",
+            self.next_steps,
+            "",
+            "=" * 70,
+            "STATISTICS:",
+            f"Articles found: {self.stats['found']}",
+            f"URLs decoded: {self.stats['decoded']}",
+            f"Full text extracted: {self.stats['extracted']}",
+            f"Using snippets: {self.stats['failed']}",
+            f"Extraction rate: {extraction_rate:.1f}%",
+            "=" * 70
+        ])
+        
+        return '\n'.join(lines)
+    
+    def as_markdown(self):
+        lines = [
+            f"# Research Report: {self.topic}",
+            f"*Generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S')}*",
+            "",
+            "## Executive Summary",
+            "",
+            self.overview,
+            "",
+            "## Detailed Analysis",
+            ""
+        ]
+        
+        for i, item in enumerate(self.summaries, 1):
+            status = "✓ Full text" if item['extracted'] else "⚠ Snippet only"
+            domain = urlparse(item['url']).netloc.replace('www.', '')
+            lines.extend([
+                f"### {i}. {item['title']}",
+                f"**Source:** [{domain}]({item['url']}) • {status}",
+                "",
+                item['summary'],
+                ""
+            ])
+        
+        extraction_rate = (self.stats['extracted']/self.stats['found']*100) if self.stats['found'] > 0 else 0
+        
+        lines.extend([
+            "## Recommended Next Steps",
+            "",
+            self.next_steps,
+            "",
+            "---",
+            "",
+            f"**Stats:** {self.stats['extracted']}/{self.stats['found']} extracted ({extraction_rate:.1f}%) • {self.stats['decoded']} URLs decoded"
+        ])
+        
+        return '\n'.join(lines)
+    
+    def save(self, format='both'):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"research_{timestamp}.{format}"
-    
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    print(f"Saved: {os.path.abspath(filename)}")
-    return filename
-
-class TaskPlanner:
-    """Figures out what steps to take based on the research goal."""
-    def __init__(self, goal):
-        self.goal = goal.lower()
-    
-    def get_steps(self):
-        """Return the steps needed for this type of research."""
-        if any(word in self.goal for word in ['news', 'latest', 'update', 'recent']):
-            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
-        elif any(word in self.goal for word in ['analyze', 'research', 'study']):
-            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
-        else:
-            # Default plan
-            return ['search', 'fetch', 'summarize', 'suggest_actions', 'save']
-
-class ResearchAgent:
-    """Main class that runs the research process."""
-    
-    def __init__(self, research_goal):
-        self.goal = research_goal
-        self.data = {}  # Store our findings
-        self.steps_log = []
-        self.planner = TaskPlanner(research_goal)
-    
-    def run_research(self):
-        """Run the complete research process."""
-        print(f"Starting research: {self.goal}")
-        print(f"Summarizer: {'Available' if summarizer else 'Basic fallback'}")
+        base_name = f"scout_report_{timestamp}"
         
-        steps = self.planner.get_steps()
-        print(f"Plan: {steps}")
+        saved = []
         
-        for step in steps:
-            print(f"-> Step: {step}")
-            success = self._do_step(step)
+        if format in ['text', 'both']:
+            txt_path = f"{base_name}.txt"
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(self.as_text())
+            saved.append(os.path.abspath(txt_path))
+        
+        if format in ['markdown', 'both']:
+            md_path = f"{base_name}.md"
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(self.as_markdown())
+            saved.append(os.path.abspath(md_path))
+        
+        return saved
+
+class ScoutAgent:
+    def __init__(self, topic, days_back=7, verbose=False):
+        self.topic = topic
+        self.days_back = days_back
+        self.verbose = verbose
+        self.articles = []
+        self.summaries = []
+        self.stats = {'found': 0, 'decoded': 0, 'extracted': 0, 'failed': 0}
+    
+    def log(self, msg):
+        if self.verbose:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    
+    def run(self):
+        print(f"Researching: {self.topic}")
+        print(f"Timeframe: Last {self.days_back} days")
+        print(f"Summarizer: {'ML-powered' if SUMMARIZER else 'Basic extraction'}")
+        print(f"Extractor: {'Trafilatura' if TRAFILATURA_AVAILABLE else 'BeautifulSoup'}")
+        print()
+        
+        # Search
+        self.log("Searching Google News...")
+        self.articles = search_news(self.topic, self.days_back)
+        self.stats['found'] = len(self.articles)
+        self.stats['decoded'] = sum(1 for a in self.articles if a.get('decoded'))
+        
+        if not self.articles:
+            print("No articles found. Try different terms or longer timeframe.")
+            return None
+        
+        print(f"Found {len(self.articles)} articles")
+        print(f"Decoded {self.stats['decoded']} Google News URLs")
+        
+        # Extract content
+        print("\nExtracting article content...")
+        enriched = []
+        
+        for i, article in enumerate(self.articles, 1):
+            url = article['url']
+            domain = urlparse(url).netloc.replace('www.', '') if url else 'unknown'
+            print(f"  [{i}/{len(self.articles)}] {domain[:30]}", end='')
             
-            if success:
-                self.steps_log.append(f"✓ {step}")
+            if self.verbose:
+                print()
+                self.log(f"URL: {url}")
+            
+            content = extract_article_text(url, self.verbose)
+            
+            if content:
+                self.stats['extracted'] += 1
+                print(" ✓")
+                enriched.append({
+                    'title': article['title'],
+                    'url': url,
+                    'content': content,
+                    'extracted': True
+                })
             else:
-                self.steps_log.append(f"✗ {step}")
-                # For search failures, try a broader search
-                if step == 'search':
-                    print("Trying broader search...")
-                    self.goal += " news"
-                    success = self._do_step('search')
-                    if success:
-                        self.steps_log.append("✓ search (broadened)")
-                        continue
-                print("Stopping due to failure")
-                break
-        
-        # Save our findings
-        text_report = self._make_text_report()
-        md_report = self._make_markdown_report()
-        
-        txt_file = save_report(text_report, format='txt')
-        md_file = save_report(md_report, format='md')
-        
-        return {'text': txt_file, 'markdown': md_file}
-    
-    def _do_step(self, step_name):
-        """Execute a single step of the research."""
-        if step_name == 'search':
-            results = grab_news_search(self.goal)
-            self.data['articles_found'] = results
-            return len(results) > 0
-        
-        elif step_name == 'fetch':
-            articles = self.data.get('articles_found', [])
-            detailed_articles = []
-            
-            for article in articles:
-                url = article.get('link', '')
-                full_text = fetch_full_article(url)
-                # If we can't get full text, use the snippet
-                if not full_text:
-                    full_text = article.get('snippet', '')[:1000]
-                
-                detailed_articles.append({
-                    'info': article,
-                    'content': full_text
+                self.stats['failed'] += 1
+                print(" ✗")
+                enriched.append({
+                    'title': article['title'],
+                    'url': url,
+                    'content': article['snippet'],
+                    'extracted': False
                 })
             
-            self.data['articles_with_content'] = detailed_articles
-            return len(detailed_articles) > 0
+            time.sleep(RATE_LIMIT_DELAY)
         
-        elif step_name == 'summarize':
-            articles = self.data.get('articles_with_content', [])
-            summaries = []
-            all_summary_text = []
+        extraction_rate = (self.stats['extracted']/self.stats['found']*100) if self.stats['found'] > 0 else 0
+        print(f"\nExtraction: {self.stats['extracted']}/{self.stats['found']} ({extraction_rate:.1f}%)")
+        
+        if self.stats['extracted'] == 0:
+            print("⚠ No full articles extracted. Using snippets.")
+            print("  (Sites may be blocking scrapers or using paywalls)")
+        
+        # Summarize
+        print("\nGenerating summaries...")
+        all_summaries_text = []
+        
+        for article in enriched[:8]:
+            self.log(f"Summarizing: {article['title'][:50]}...")
+            summary = summarize_text(article['content'])
             
-            for article in articles[:6]:  # Limit to 6 articles
-                title = article['info'].get('title', 'Untitled')
-                link = article['info'].get('link', '')
-                content = article['content']
-                
-                summary = smart_summarize(content)
-                summaries.append({
-                    'title': title,
-                    'link': link,
-                    'summary': summary
-                })
-                all_summary_text.append(summary)
-            
-            # Create overall summary
-            combined_text = " ".join(all_summary_text)
-            overall = smart_summarize(combined_text, 200) if combined_text else "No summary available"
-            
-            self.data['article_summaries'] = summaries
-            self.data['big_picture'] = overall
-            return True
+            self.summaries.append({
+                'title': article['title'],
+                'url': article['url'],
+                'summary': summary,
+                'extracted': article['extracted']
+            })
+            all_summaries_text.append(summary)
         
-        elif step_name == 'suggest_actions':
-            overall = self.data.get('big_picture', '')
-            details_text = " ".join([s['summary'] for s in self.data.get('article_summaries', [])])
-            combined = overall + " " + details_text
-            
-            actions = generate_follow_up_ideas(combined, 5)
-            self.data['next_steps'] = actions
-            return True
+        # Overview
+        print("Creating overview...")
+        combined = ' '.join(all_summaries_text)
+        overview = summarize_text(combined, 250) if combined else "Unable to generate overview"
         
-        elif step_name == 'save':
-            return True  # We'll handle saving separately
+        # Next steps
+        print("Identifying research leads...")
+        next_steps = extract_research_leads(combined)
         
-        return False
-    
-    def _make_text_report(self):
-        """Create a plain text version of the report."""
-        lines = []
-        lines.append(f"RESEARCH REPORT")
-        lines.append(f"Topic: {self.goal}")
-        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        lines.append("=" * 50)
+        # Report
+        print("\nGenerating report...")
+        reporter = Reporter(
+            self.topic,
+            self.articles,
+            self.summaries,
+            overview,
+            next_steps,
+            self.stats
+        )
         
-        lines.append("\nKEY FINDINGS:")
-        lines.append(self.data.get('big_picture', 'No summary available'))
+        saved_files = reporter.save()
         
-        lines.append("\nDETAILED SUMMARIES:")
-        for i, article in enumerate(self.data.get('article_summaries', []), 1):
-            lines.append(f"\n{i}. {article['title']}")
-            lines.append(f"   Link: {article['link']}")
-            lines.append(f"   Summary: {article['summary']}")
+        print("\nReport saved:")
+        for path in saved_files:
+            print(f"  {path}")
         
-        lines.append("\nNEXT RESEARCH STEPS:")
-        lines.append(self.data.get('next_steps', 'No suggestions generated'))
-        
-        lines.append("\nPROCESS LOG:")
-        lines.append("\n".join(self.steps_log))
-        
-        return "\n".join(lines)
-    
-    def _make_markdown_report(self):
-        """Create a markdown version of the report."""
-        lines = []
-        lines.append(f"# Research Report: {self.goal}")
-        lines.append(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
-        lines.append("")
-        
-        lines.append("## Executive Summary")
-        lines.append(self.data.get('big_picture', 'No summary available'))
-        lines.append("")
-        
-        lines.append("## Detailed Findings")
-        for i, article in enumerate(self.data.get('article_summaries', []), 1):
-            lines.append(f"### {i}. {article['title']}")
-            lines.append(f"[Source]({article['link']})  ")
-            lines.append(f"{article['summary']}  ")
-            lines.append("")
-        
-        lines.append("## Recommended Next Steps")
-        lines.append(self.data.get('next_steps', 'No suggestions generated'))
-        lines.append("")
-        
-        lines.append("## Research Process")
-        lines.append("```")
-        lines.append("\n".join(self.steps_log))
-        lines.append("```")
-        
-        return "\n".join(lines)
+        return reporter
 
 def main():
-    """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python scout_agent.py 'research topic'")
-        print("Example: python scout_agent.py 'AI regulation'")
+    parser = argparse.ArgumentParser(
+        description='ScoutAgent - Automated news research',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s "quantum computing"
+  %(prog)s "climate policy" --days 14
+  %(prog)s "cybersecurity" --verbose
+        """
+    )
+    
+    parser.add_argument('topic', help='Research topic')
+    parser.add_argument('--days', type=int, default=7, help='Days back (default: 7)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Detailed output')
+    
+    args = parser.parse_args()
+    
+    setup_cache()
+    
+    agent = ScoutAgent(args.topic, args.days, args.verbose)
+    result = agent.run()
+    
+    if result:
+        print("\n✓ Research complete!")
+    else:
+        print("\n✗ Research failed")
         sys.exit(1)
-    
-    topic = " ".join(sys.argv[1:])
-    agent = ResearchAgent(topic)
-    results = agent.run_research()
-    
-    print(f"\nResearch complete! Check:")
-    print(f"  - {results['text']}")
-    print(f"  - {results['markdown']}")
 
 if __name__ == "__main__":
     main()
+#Hell yeah it cannot extract now "snippet only!" lol I wil try to fix it in future, if you can please fix it :)
