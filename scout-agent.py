@@ -3,7 +3,7 @@
 """
 scout agent  
 project -13  
-v1.5 - okay NOW we're fighting... added like 5 layers of fallbacks, still fails 40% but ¯\_(ツ)_/¯
+v1.987 - okay NOW we're fighting... added like 5 layers of fallbacks, still fails 40% but ¯\_(ツ)_/¯
 """
 
 import warnings
