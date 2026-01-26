@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-ScoutAgent - News research automation tool
-Author: github.com/Aranya-Marjara
-
-Crawls recent news, extracts actual content, and generates research reports.
-Actually reads the articles, not just headlines.
-
-Usage:
-    ./scout_agent.py "your topic here"
-    ./scout_agent.py "AI policy changes" --days 14
+scout agent
+project -13
 """
 
 import warnings
@@ -108,41 +101,41 @@ def decode_google_news_url(encoded_url):
     
     try:
         # Extract the base64 part from the URL
-        # Format: https://news.google.com/rss/articles/CBMi...?oc=5
+        # Format: https://news.google.com/rss/articles/CBMi...?oc=5 #why?
         if '/articles/' in encoded_url:
             parts = encoded_url.split('/articles/')
             if len(parts) > 1:
                 encoded_part = parts[1].split('?')[0]
                 
-                # The encoded part starts with CBM or similar prefix
-                # Try to decode it
+                # the encoded part starts with CBM or similar prefix
+                # decode it
                 try:
-                    # Remove the prefix (usually CBMi, CBMi, etc)
+                    # remove the prefix (usually CBMi, CBMi, etc)
                     if len(encoded_part) > 4:
-                        base64_data = encoded_part[4:]  # Skip prefix
+                        base64_data = encoded_part[4:]  # skip it!
                         
-                        # Add padding if needed
+                        # idk pading might be needed
                         padding = 4 - (len(base64_data) % 4)
                         if padding and padding != 4:
                             base64_data += '=' * padding
                         
                         decoded = base64.urlsafe_b64decode(base64_data).decode('utf-8', errors='ignore')
                         
-                        # Look for URLs in the decoded data
+                        # checking urls in the data
                         url_match = re.search(r'https?://[^\s<>"]+', decoded)
                         if url_match:
                             return url_match.group(0)
                 except Exception:
                     pass
         
-        # Fallback: try to follow the redirect
+        # following the redirect (fallback,nuke it!!)
         try:
             session = requests.Session()
             session.max_redirects = 10
             resp = session.head(encoded_url, allow_redirects=True, timeout=10,
                               headers={'User-Agent': USER_AGENT})
             
-            # Check if we got redirected away from google.com
+            # did google.com redirected this away?
             if 'google.com' not in resp.url:
                 return resp.url
         except Exception:
@@ -176,7 +169,7 @@ def search_news(query, days_back=7, max_results=12):
         desc = item.description.text if item.description else ""
         snippet = BeautifulSoup(desc, 'html.parser').get_text().strip()
         
-        # Try to decode the Google News URL
+        # please/try to decode it's url
         real_url = decode_google_news_url(google_link)
         
         articles.append({
@@ -207,12 +200,12 @@ def extract_with_beautifulsoup(html_content):
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Remove junk
+        # Remove junk!!!
         for element in soup(['script', 'style', 'nav', 'header', 'footer', 
                             'aside', 'iframe', 'noscript', 'svg']):
             element.decompose()
         
-        # Try common article containers
+        # I guess common article....
         article_containers = soup.find_all(['article', 'div'], 
                                           class_=re.compile(r'article|content|post|entry|story', re.I))
         
@@ -229,7 +222,7 @@ def extract_with_beautifulsoup(html_content):
                 full_text = re.sub(r'\s+', ' ', full_text)
                 return full_text
         
-        # Fallback: all paragraphs
+        # all para?
         paragraphs = []
         for p in soup.find_all('p'):
             text = p.get_text().strip()
@@ -275,7 +268,7 @@ def extract_article_text(url, verbose=False):
         
         html_content = resp.content
         
-        # Try trafilatura
+        # trafilatura ;)
         extracted = extract_with_trafilatura(html_content)
         if extracted:
             if verbose:
@@ -283,7 +276,7 @@ def extract_article_text(url, verbose=False):
             save_to_cache(url, extracted)
             return extracted[:MAX_ARTICLE_LENGTH]
         
-        # Try BeautifulSoup
+        # delicious soup
         extracted = extract_with_beautifulsoup(html_content)
         if extracted and len(extracted) > 300:
             if verbose:
@@ -343,7 +336,7 @@ def summarize_text(text, max_len=150):
         except Exception:
             pass
     
-    # Manual fallback
+    # MF
     sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 20]
     
     if not sentences:
@@ -368,7 +361,7 @@ def extract_research_leads(text, count=5):
             seen.add(noun)
             interesting.append(noun)
     
-    # Also look for technical terms
+    # Atech terms?
     if len(interesting) < count:
         words = [w.strip('.,;:') for w in text.split()]
         technical = [w for w in words if len(w) > 8 and w[0].islower() and w.isalnum()]
@@ -516,7 +509,7 @@ class ScoutAgent:
         print(f"Extractor: {'Trafilatura' if TRAFILATURA_AVAILABLE else 'BeautifulSoup'}")
         print()
         
-        # Search
+        # find!!
         self.log("Searching Google News...")
         self.articles = search_news(self.topic, self.days_back)
         self.stats['found'] = len(self.articles)
@@ -529,7 +522,7 @@ class ScoutAgent:
         print(f"Found {len(self.articles)} articles")
         print(f"Decoded {self.stats['decoded']} Google News URLs")
         
-        # Extract content
+        # skudoosh content!
         print("\nExtracting article content...")
         enriched = []
         
@@ -572,7 +565,7 @@ class ScoutAgent:
             print("⚠ No full articles extracted. Using snippets.")
             print("  (Sites may be blocking scrapers or using paywalls)")
         
-        # Summarize
+        # tell summary of it
         print("\nGenerating summaries...")
         all_summaries_text = []
         
@@ -588,16 +581,15 @@ class ScoutAgent:
             })
             all_summaries_text.append(summary)
         
-        # Overview
+        # view or overview?
         print("Creating overview...")
         combined = ' '.join(all_summaries_text)
         overview = summarize_text(combined, 250) if combined else "Unable to generate overview"
         
-        # Next steps
         print("Identifying research leads...")
         next_steps = extract_research_leads(combined)
         
-        # Report
+        # what is the report?
         print("\nGenerating report...")
         reporter = Reporter(
             self.topic,
