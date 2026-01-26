@@ -47,7 +47,7 @@ USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 REQUEST_TIMEOUT = 15
 MAX_ARTICLE_LENGTH = 6000
 CACHE_DIR = '.scout_cache'
-RATE_LIMIT_DELAY = 0.9
+RATE_LIMIT_DELAY = 1.7
 
 def setup_cache():
     if not os.path.exists(CACHE_DIR):
