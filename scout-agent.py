@@ -3,7 +3,7 @@
 """
 scout agent  
 project -13  
-v1.987 - okay NOW we're fighting... added like 5 layers of fallbacks, still fails 40% but ¯\_(ツ)_/¯
+v1.987 -
 """
 
 import warnings
@@ -55,7 +55,7 @@ try:
 except ImportError:
     MARKDOWNIFY_AVAILABLE = False
 
-# bumble bee - sometimes works, sometimes OOMs ¯\_(ツ)_/¯
+# bumble bee!!!
 SUMMARIZER = None
 try:
     from transformers import pipeline
@@ -76,7 +76,7 @@ try:
 except Exception as e:
     print(f"[warn] transformers import failed: {e}")
 
-# the config to be nice with servers,yes it's to be nice only and ntg else do not misuse it!!!  ;)
+# the config to be nice with servers  ;)
 USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -172,7 +172,7 @@ def decode_google_news_url(encoded_url):
     except Exception:
         pass
     
-    # Method 2: Base64 decoding (original method)
+    # Method 2: Base64 decoding the OG method
     try:
         # Extract the base64 part from the URL
         # Format: https://news.google.com/rss/articles/CBMi...?oc=5 #why?
@@ -223,7 +223,7 @@ def decode_google_news_url(encoded_url):
     except Exception as e:
         pass
     
-    # selinum bro!
+    # selinum 
     
     return encoded_url  # just return idk
 
@@ -414,7 +414,6 @@ def extract_with_beautifulsoup_aggressive(html_content):
         for elem in soup.find_all(['p', 'div', 'section', 'article']):
             text = elem.get_text(strip=True)
             if len(text) > 100:
-                # score by lenght and sus phrase
                 score = len(text)
                 if any(word in text.lower() for word in ['advertisement', 'sponsored', 'click here', 'sign up']):
                     score *= 0.3
@@ -467,7 +466,7 @@ def extract_article_text_multi(url, verbose=False):
     html_content = None
     extracted_text = None
     
-    # bruteforce!!!!!
+    # try again
     for attempt in range(2):
         try:
             headers = {
@@ -549,7 +548,7 @@ def extract_article_text_multi(url, verbose=False):
                 result = re.sub(r'\s+', ' ', result)
                 result = re.sub(r'\n\s*\n', '\n\n', result)
                 
-                # i belive these are some common pice of $
+                # Garbage
                 garbage_patterns = [
                     r'Advertisement\s*',
                     r'Sponsored\s*',
@@ -582,24 +581,23 @@ def summarize_text(text, max_len=180):
     if not text or len(text) < 100:
         return text
     
-    # Try bumble bee first 
+    # try bumble bee first 
     if SUMMARIZER:
         try:
-            # estimate token count yeah roughly.
+            # estimate token count atleast roughly
             words = text.split()
             if len(words) < 60:
                 return text
             
             # TL config
             if len(words) > 800:
-                # hinokami kangura!
                 target_max = min(max_len, 150)
                 target_min = max(60, int(target_max * 0.4))
             else:
                 target_max = min(max_len, int(len(words) * 0.6))
                 target_min = max(40, int(target_max * 0.4))
             
-            # just suppress it like G##3nm3*T does always!
+            # just suppress it
             old_stdout = sys.stdout
             old_stderr = sys.stderr
             sys.stdout = open(os.devnull, 'w')
@@ -626,7 +624,6 @@ def summarize_text(text, max_len=180):
         except Exception as e:
             pass
     
-    # skadoosh key sentance aka fallback!!
     try:
         # SiS
         sentences = re.split(r'[.!?]+', text)
@@ -636,7 +633,7 @@ def summarize_text(text, max_len=180):
             words = text.split()
             return ' '.join(words[:60]) + '...'
         
-        # very very simple scoring: i guess longer sentences with important words
+        # Common words
         scored_sentences = []
         important_words = {'study', 'research', 'found', 'shows', 'according', 'report', 
                           'data', 'analysis', 'results', 'concluded', 'suggests'}
@@ -649,7 +646,6 @@ def summarize_text(text, max_len=180):
                 if word in sentence.lower():
                     score += 10
             
-            # i expect nitro boost!
             if i < 3:
                 score += 5
             
@@ -659,7 +655,7 @@ def summarize_text(text, max_len=180):
         scored_sentences.sort(reverse=True, key=lambda x: x[0])
         top_sentences = [s for _, s in scored_sentences[:min(4, len(scored_sentences))]]
         
-        # idk if this help to maintain *the same chronology
+        # same chronology
         final_sentences = []
         for orig_sentence in sentences:
             if orig_sentence in top_sentences and orig_sentence not in final_sentences:
@@ -947,7 +943,7 @@ class ScoutAgent:
             print(f" Full report saved: {report_file}")
             
         except Exception as e:
-            print(f"❌ Failed to save report: {e}")
+            print(f" Failed to save report: {e}")
         
         return {
             'topic': self.topic,
@@ -1023,10 +1019,8 @@ if __name__ == "__main__":
     main()
 
 
-## TODO
-# 1. Try selenium/playwright for JS sites (painful but works)
-# 2. Use 2captcha or similar for Cloudflare
-# 3. Pay for an API (diffbot, scraperapi, etc.)
-# 4. Accept that some sites are just un-scrapable ¯\_(ツ)_/¯
-# 5. Get some sleep.
-```
+#TODO
+'''
+27/jan/2026
+this date? it shows how aggressively websites block custom scripts and give them boilerplate!
+'''
