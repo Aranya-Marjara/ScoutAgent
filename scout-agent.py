@@ -42,12 +42,12 @@ try:
 except Exception:
     SUMMARIZER = None
 
-# Config
+# the config to be nice with servers ;)
 USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 REQUEST_TIMEOUT = 15
 MAX_ARTICLE_LENGTH = 6000
 CACHE_DIR = '.scout_cache'
-RATE_LIMIT_DELAY = 0.8
+RATE_LIMIT_DELAY = 0.9
 
 def setup_cache():
     if not os.path.exists(CACHE_DIR):
