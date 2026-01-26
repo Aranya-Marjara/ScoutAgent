@@ -1022,15 +1022,11 @@ Tips:
 if __name__ == "__main__":
     main()
 
-# OKAY so I added like 5 more extraction methods, URL decoding hacks, user-agent rotation,
-# paywall detection, better error handling, and it STILL fails on like 40% of sites...
-# Modern web scraping is basically an arms race at this point.
-#
-# Next steps if we're desperate:
+
+## TODO
 # 1. Try selenium/playwright for JS sites (painful but works)
 # 2. Use 2captcha or similar for Cloudflare
 # 3. Pay for an API (diffbot, scraperapi, etc.)
 # 4. Accept that some sites are just un-scrapable ¯\_(ツ)_/¯
-#
-# But hey, at least we're trying! - 3:27 AM edition
+# 5. Get some sleep.
 ```
